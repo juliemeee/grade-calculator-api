@@ -2,8 +2,16 @@ import logging
 
 from fastapi import FastAPI, HTTPException, Query
 
+import os
+
 # Каркас: FastAPI - фреймворк, каждый маршрут объявляется декоратором @app.get(...)
-app = FastAPI(title="Grade Calculator")
+APP_NAME = os.getenv("APP_NAME", "Grade Calculator")
+APP_AUTHOR = os.getenv("APP_AUTHOR", "Unknown author")
+APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
+APP_SCALE_MAX = float(os.getenv("APP_SCALE_MAX", "10"))
+
+app = FastAPI(title=APP_NAME)
+
 
 # Логи: basicConfig выводит события в консоль запуска
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -12,14 +20,21 @@ logger = logging.getLogger("grade_calculator")
 
 @app.on_event("startup")
 def log_startup():
-    # Событие "запуск" в лог - требование из PDF
-    logger.info("Приложение запущено")
+    # Событие "запуск" в лог
+        logger.info("Приложение %s (версия %s) запущено. Автор: %s", APP_NAME, APP_VERSION, APP_AUTHOR)
+    for course_id, course in COURSES.items():
+        total = sum(course["components"].values())
+        if abs(total * APP_SCALE_MAX - course["max_total"]) > 0.001:
+            logger.warning(
+                "У курса '%s' сумма весов даёт %.2f баллов, а заявлено %.1f — проверьте схему оценивания",
+                course_id, total * APP_SCALE_MAX, course["max_total"],
+            )
 
 
 @app.get("/")
 def root():
     # Стартовая страница-указатель
-    return {"app": "Grade Calculator", "docs": "/docs"}
+        return {"app": APP_NAME, "author": APP_AUTHOR, "docs": "/docs"}
 
 
 @app.get("/health")
