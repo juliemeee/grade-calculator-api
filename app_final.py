@@ -107,3 +107,98 @@ def course_detail(course_id: str):
     }
 
 
+def parse_scores(course: dict, raw: str) -> dict:
+    # Разбираем строку 'hw1:8,hw2:9' и проверяем каждое значение
+    scores = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, value = part.partition(":")
+        if not sep:
+            raise HTTPException(status_code=400, detail=f"Неверный формат '{part}', ожидается 'имя:оценка'")
+        name = name.strip()
+        if name not in course["components"]:
+            raise HTTPException(status_code=400, detail=f"Компонент '{name}' не входит в курс '{course['name']}'")
+        try:
+            score = float(value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Оценка '{value}' не является числом")
+        if not 0 <= score <= APP_SCALE_MAX:
+            raise HTTPException(status_code=400, detail=f"Оценка '{name}' должна быть от 0 до {APP_SCALE_MAX}")
+        scores[name] = score
+    if not scores:
+        raise HTTPException(status_code=400, detail="Не передано ни одной оценки")
+    return scores
+
+
+@app.get("/grade/{course_id}")
+def grade(course_id: str, scores: str = Query(description="Оценки в формате 'hw1:8,hw2:9'")):
+    course = get_course(course_id)
+    parsed = parse_scores(course, scores)
+    # Взвешенная сумма только по переданным компонентам
+    accumulated = sum(course["components"][name] * value for name, value in parsed.items())
+    known_weight = sum(course["components"][name] for name in parsed)
+    final_grade = min(accumulated, course["final_max"])
+    logger.info("Курс '%s': накоплено %.2f, итог %.2f", course_id, accumulated, final_grade)
+    return {
+        "course": course["name"],
+        "scores": parsed,
+        "accumulated": round(accumulated, 2),
+        "known_weight": round(known_weight, 2),
+        "remaining_weight": round(course["max_total"] / APP_SCALE_MAX - known_weight, 2),
+        "final_grade": round(final_grade, 2),
+        "capped": accumulated > course["final_max"],
+    }
+
+
+@app.get("/target/{course_id}")
+def target(
+    course_id: str,
+    known: str = Query(description="Уже известные оценки в формате 'hw1:8,hw2:9'"),
+    target_grade: float = Query(description="Желаемая итоговая оценка"),
+):
+    course = get_course(course_id)
+    if not 0 <= target_grade <= course["final_max"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Целевая оценка должна быть от 0 до {course['final_max']} для курса '{course['name']}'",
+        )
+    parsed = parse_scores(course, known)
+    accumulated = sum(course["components"][name] * value for name, value in parsed.items())
+    total_weight = course["max_total"] / APP_SCALE_MAX
+    remaining = round(total_weight - sum(course["components"][name] for name in parsed), 2)
+
+    if remaining <= 0:
+        feasible = accumulated >= target_grade
+        return {
+            "course": course["name"],
+            "accumulated": round(accumulated, 2),
+            "remaining_weight": 0.0,
+            "feasible": feasible,
+            "required_score": None,
+            "message": (
+                "Все компоненты сданы, итог определён окончательно"
+                if feasible
+                else f"Желаемый итог {target_grade} уже недостижим: накоплено {round(accumulated, 2)}"
+            ),
+        }
+
+    # x = (цель - накоплено) / вес оставшихся компонентов
+    required = (target_grade - accumulated) / remaining
+    feasible = 0 <= required <= APP_SCALE_MAX
+    result = {
+        "course": course["name"],
+        "accumulated": round(accumulated, 2),
+        "remaining_weight": remaining,
+        "target_grade": target_grade,
+        "feasible": feasible,
+        "required_score": round(required, 2) if feasible else None,
+    }
+    if feasible:
+        result["message"] = f"Для итога {target_grade} нужно набрать {round(required, 2)} за оставшиеся компоненты"
+    else:
+        top = round(min(accumulated + remaining * APP_SCALE_MAX, course["final_max"]), 2)
+        result["message"] = f"Цель {target_grade} недостижима: максимум при текущих накоплениях — {top}"
+    logger.info("Курс '%s': цель %.1f, достижима: %s", course_id, target_grade, feasible)
+    return result
